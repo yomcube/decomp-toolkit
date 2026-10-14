@@ -5,7 +5,6 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use cwdemangle::{DemangleOptions, demangle};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use typed_path::Utf8NativePath;
 
 use crate::{
     analysis::{
@@ -18,7 +17,6 @@ use crate::{
         ObjInfo, ObjKind, ObjReloc, ObjRelocKind, ObjSection, ObjSymbol, ObjSymbolFlagSet,
         ObjSymbolKind, SectionIndex, SymbolIndex,
     },
-    util::elf::process_elf,
 };
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -245,14 +243,13 @@ pub fn compare_signature(existing: &mut FunctionSignature, new: &FunctionSignatu
 }
 
 pub fn generate_signature(
-    path: &Utf8NativePath,
+    mut obj: ObjInfo,
     symbol_name: &str,
 ) -> Result<Option<FunctionSignature>> {
     let mut out_symbols: Vec<OutSymbol> = Vec::new();
     let mut out_relocs: Vec<OutReloc> = Vec::new();
     let mut symbol_map: BTreeMap<SymbolIndex, u32> = BTreeMap::new();
 
-    let mut obj = process_elf(path)?;
     if obj.kind == ObjKind::Executable
         && (obj.sda2_base.is_none()
             || obj.sda_base.is_none()

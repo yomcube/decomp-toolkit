@@ -13,7 +13,7 @@ use crate::{
     util::signatures::{apply_signature, check_signatures, check_signatures_str, parse_signatures},
 };
 
-const SIGNATURES: &[(&str, &str)] = &[
+pub const SIGNATURES: &[(&str, &str)] = &[
     ("__init_registers", include_str!("../../assets/signatures/__init_registers.yml")),
     ("__init_hardware", include_str!("../../assets/signatures/__init_hardware.yml")),
     ("__init_data", include_str!("../../assets/signatures/__init_data.yml")),
@@ -191,7 +191,7 @@ const SIGNATURES: &[(&str, &str)] = &[
     ("__stdio_atexit", include_str!("../../assets/signatures/__stdio_atexit.yml")),
     ("__StringWrite", include_str!("../../assets/signatures/__StringWrite.yml")),
 ];
-const POST_SIGNATURES: &[(&str, &str)] = &[
+pub const POST_SIGNATURES: &[(&str, &str)] = &[
     ("RSOStaticLocateObject", include_str!("../../assets/signatures/RSOStaticLocateObject.yml")),
     ("GXInit", include_str!("../../assets/signatures/GXInit.yml")),
     ("__register_fragment", include_str!("../../assets/signatures/__register_fragment.yml")),

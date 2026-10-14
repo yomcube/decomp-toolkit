@@ -1,12 +1,13 @@
 use std::{
-    collections::{BTreeMap, HashMap, btree_map},
-    fs,
-    fs::DirBuilder,
+    collections::{BTreeMap, HashMap, HashSet, btree_map},
+    fs::{self, DirBuilder},
     io::{Cursor, Write},
+    println,
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
 use argp::FromArgs;
+use itertools::izip;
 use objdiff_core::obj::split_meta::{SPLITMETA_SECTION, SplitMeta};
 use object::{
     FileFlags, Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionFlags, SectionIndex,
@@ -16,7 +17,8 @@ use object::{
 use typed_path::Utf8NativePathBuf;
 
 use crate::{
-    obj::ObjKind,
+    analysis::signatures::{POST_SIGNATURES, SIGNATURES},
+    obj::{ObjInfo, ObjKind, ObjSymbolKind},
     util::{
         IntoCow, ToCow,
         asm::write_asm,
@@ -94,10 +96,13 @@ pub struct SignaturesArgs {
     files: Vec<Utf8NativePathBuf>,
     #[argp(option, short = 's')]
     /// symbol name
-    symbol: String,
+    symbols: Vec<String>,
     #[argp(option, short = 'o', from_str_fn(native_path))]
     /// output yml
-    out_file: Utf8NativePathBuf,
+    out_files: Vec<Utf8NativePathBuf>,
+    #[argp(switch, short = 'r')]
+    /// recursive
+    recursive: bool,
 }
 
 #[derive(FromArgs, PartialEq, Eq, Debug)]
@@ -114,7 +119,7 @@ pub fn run(args: Args) -> Result<()> {
         SubCommand::Config(c_args) => config(c_args),
         SubCommand::Disasm(c_args) => disasm(c_args),
         SubCommand::Fixup(c_args) => fixup(c_args),
-        SubCommand::Signatures(c_args) => signatures(c_args),
+        SubCommand::Signatures(c_args) => signatures(c_args, None),
         SubCommand::Info(c_args) => info(c_args),
     }
 }
@@ -390,32 +395,105 @@ fn has_section_flags(flags: SectionFlags, flag: u32) -> Result<bool> {
     }
 }
 
-fn signatures(args: SignaturesArgs) -> Result<()> {
+const EXCLUDE: &[&str] = &["OSRegisterVersion", "OSPanic"];
+fn signatures(args: SignaturesArgs, old_syms: Option<Vec<String>>) -> Result<()> {
+    if args.symbols.len() != args.out_files.len() {
+        return Err(anyhow!("Must have matching symbols and out_files"));
+    }
+
     // Process response files (starting with '@')
     let files = process_rsp(&args.files)?;
 
-    let mut signatures: HashMap<String, FunctionSignature> = HashMap::new();
-    for path in files {
+    let mut allsignatures: HashMap<String, HashMap<String, FunctionSignature>> = HashMap::new();
+    for symbol in &args.symbols {
+        println!("{}", symbol);
+        allsignatures.insert(symbol.to_string(), HashMap::new());
+    }
+    for path in &files {
         log::info!("Processing {}", path);
-        let signature = match generate_signature(&path, &args.symbol) {
-            Ok(Some(signature)) => signature,
-            Ok(None) => continue,
-            Err(e) => {
-                eprintln!("Failed: {e:?}");
-                continue;
-            }
-        };
-        log::info!("Comparing hash {}", signature.hash);
-        if let Some(existing) = signatures.get_mut(&signature.hash) {
-            compare_signature(existing, &signature)?;
-        } else {
-            signatures.insert(signature.hash.clone(), signature);
+        let obj = process_elf(path)?;
+        for symbol in &args.symbols {
+            if let Some(signatures) = allsignatures.get_mut(symbol) {
+                sig_gen(obj.clone(), symbol, signatures)?;
+            };
         }
     }
-    let mut signatures = signatures.into_values().collect::<Vec<FunctionSignature>>();
+    for (symbol, out_file) in izip!(args.symbols, args.out_files) {
+        if let Some(sigs) = allsignatures.get_mut(&symbol) {
+            sig_write(sigs, out_file)?;
+        };
+    }
+    if args.recursive {
+        let mut syms: Vec<(String, Utf8NativePathBuf)> = Vec::new();
+        let mut seen = HashSet::new();
+        for signatures in allsignatures.values() {
+            for sig in signatures.values() {
+                if sig.relocations.is_empty() {
+                    continue;
+                }
+                for sym in sig.symbols.iter().skip(1) {
+                    if sym.kind != ObjSymbolKind::Function {
+                        continue;
+                    }
+                    if !seen.insert(sym.name.clone()) {
+                        continue;
+                    }
+                    let out_file = Utf8NativePathBuf::from(
+                        format!("{}.yml", sym.name).replace('<', "%3C").replace('>', "%3E"),
+                    );
+                    syms.push((sym.name.clone(), out_file));
+                }
+            }
+        }
+        let sigs_syms: HashSet<&str> =
+            SIGNATURES.iter().chain(POST_SIGNATURES.iter()).map(|(name, _)| *name).collect();
+        let old_syms_set: HashSet<&str> =
+            old_syms.as_deref().unwrap_or_default().iter().map(String::as_str).collect();
+        syms.retain(|(sym, _)| {
+            !old_syms_set.contains(sym.as_str())
+                && !sigs_syms.contains(sym.as_str())
+                && !EXCLUDE.contains(&sym.as_str())
+        });
+        if !syms.is_empty() {
+            let (symbols, out_files): (Vec<_>, Vec<_>) = syms.into_iter().unzip();
+            signatures(
+                SignaturesArgs { files, symbols: symbols.clone(), out_files, recursive: true },
+                Some(symbols),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn sig_gen(
+    obj: ObjInfo,
+    symbol: &str,
+    signatures: &mut HashMap<String, FunctionSignature>,
+) -> Result<()> {
+    let signature = match generate_signature(obj, symbol) {
+        Ok(Some(signature)) => signature,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            eprintln!("Failed: {e:?}");
+            return Err(e);
+        }
+    };
+    log::info!("Comparing hash {}", signature.hash);
+    if let Some(existing) = signatures.get_mut(&signature.hash) {
+        compare_signature(existing, &signature)?;
+    } else {
+        signatures.insert(signature.hash.clone(), signature);
+    }
+    Ok(())
+}
+fn sig_write(
+    signatures: &mut HashMap<String, FunctionSignature>,
+    out_file: Utf8NativePathBuf,
+) -> Result<()> {
+    let mut signatures = signatures.clone().into_values().collect::<Vec<FunctionSignature>>();
     log::info!("{} unique signatures", signatures.len());
     signatures.sort_by_key(|s| s.signature.len());
-    let mut out = buf_writer(&args.out_file)?;
+    let mut out = buf_writer(&out_file)?;
     serde_yaml::to_writer(&mut out, &signatures)?;
     out.flush()?;
     Ok(())
