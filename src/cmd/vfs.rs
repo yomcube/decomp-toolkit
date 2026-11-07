@@ -7,6 +7,7 @@ use typed_path::{Utf8NativePath, Utf8NativePathBuf, Utf8UnixPath};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    cmd::shasum::file_sha1_string,
     util::{file::buf_copy, path::native_path},
     vfs::{
         FileFormat, OpenResult, Vfs, VfsFile, VfsFileType, VfsMetadata, decompress_file, detect,
@@ -86,18 +87,22 @@ fn file_info(
     filename: &str,
     file: &mut dyn VfsFile,
     metadata: &VfsMetadata,
-) -> anyhow::Result<Columns<5>> {
+) -> anyhow::Result<Columns<6>> {
     let format =
         detect(file).with_context(|| format!("Failed to detect file format for {filename}"))?;
-    let mut info: Columns<5> = [
+    let sha1 = file_sha1_string(file).unwrap_or(" ".to_string());
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut info: Columns<6> = [
         Size::from_bytes(metadata.len).to_string(),
         filename.to_string(),
         format.to_string(),
         String::new(),
         String::new(),
+        sha1,
     ];
     if let FileFormat::Compressed(kind) = format {
-        let mut decompressed = decompress_file(file, kind)?;
+        let mut decompressed = decompress_file(file, kind)
+            .with_context(|| format!("Failed to decompress {filename}"))?;
         let metadata = decompressed
             .metadata()
             .with_context(|| format!("Failed to fetch metadata for {filename}"))?;
@@ -151,7 +156,7 @@ fn ls_file(
     display_path: &Utf8UnixPath,
     metadata: &VfsMetadata,
     args: &LsArgs,
-    files: &mut Vec<Columns<5>>,
+    files: &mut Vec<Columns<6>>,
 ) -> anyhow::Result<()> {
     if args.short {
         println!("{display_path}");
@@ -182,7 +187,7 @@ fn ls_directory(
     path: &Utf8UnixPath,
     base_filename: &Utf8UnixPath,
     args: &LsArgs,
-    files: &mut Vec<Columns<5>>,
+    files: &mut Vec<Columns<6>>,
 ) -> anyhow::Result<()> {
     let entries = fs.read_dir(path)?;
     files.reserve(entries.len());
@@ -207,6 +212,7 @@ fn ls_directory(
                         "        ".to_string(),
                         format!("{display_path}/"),
                         "Directory".to_string(),
+                        String::new(),
                         String::new(),
                         String::new(),
                     ]);

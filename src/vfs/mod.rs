@@ -14,6 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use byteorder::ReadBytesExt;
 use common::{StaticFile, WindowedFile};
 use disc::{DiscFs, nod_to_io_error};
 use dyn_clone::DynClone;
@@ -192,10 +193,27 @@ where R: Read + Seek + ?Sized {
             file.seek(SeekFrom::Start(0))?;
             match format {
                 Some(format) => Ok(FileFormat::Archive(ArchiveKind::Disc(format))),
-                None => Ok(FileFormat::Regular),
+                None => {
+                    let res = match test_nlzss(file) {
+                       Ok(_) => Ok(FileFormat::Compressed(CompressionKind::Nlzss)),
+                       Err(_) => Ok(FileFormat::Regular)
+                    };
+                    file.seek(SeekFrom::Start(0))?;
+                    return res;
+                }
             }
         }
     }
+}
+fn test_nlzss<R>(file: &mut R) -> anyhow::Result<()>
+where R: Read + Seek + ?Sized {
+    let decompressed = nlzss::decompress(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    let length = file.read_u32::<byteorder::LittleEndian>()? >> 8;
+    if length as usize == decompressed.len() {
+        return Ok(());
+    }
+    anyhow::bail!("NLZSS test fail");
 }
 
 pub enum OpenResult {
